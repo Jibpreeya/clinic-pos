@@ -1,102 +1,99 @@
-# AI_PROMPTS.md — How I Used Claude in This Build
+# AI_PROMPTS.md
 
-## Strategy
-
-I used Claude as a pair programmer, not a code generator. Every output was reviewed for:
-- Tenant safety correctness
-- Concurrency edge cases
-- Over-engineering (rejected several suggestions)
+## เครื่องมือที่ใช้
+- Claude — หลักๆ ใช้คุยเรื่อง architecture, ให้ generate โค้ด, และถกเรื่อง trade-off
 
 ---
 
-## Prompt 1 — Architecture Design
+## วิธีที่ใช้จริงๆ
 
-**Prompt:**
-> "I'm building a multi-tenant clinic POS with .NET 10, PostgreSQL, Next.js, Redis, RabbitMQ.
-> 1 Tenant → many Branches. 1 Patient belongs to 1 Tenant.
-> What's the safest way to implement tenant isolation that prevents developer mistakes?"
-
-**Claude's output:**
-- Option A: Middleware that checks TenantId on every request
-- Option B: EF Core Global Query Filters injected via DbContext
-- Option C: Row-level security at PostgreSQL level
-
-**My decision:** Option B — EF Core Global Query Filters.
-
-**Why I accepted it:** It's the only approach where isolation is automatic and compile-time safe. Middleware (Option A) relies on every developer remembering to filter. RLS (Option C) is powerful but adds ops complexity not justified for v1.
-
-**What I rejected:** Claude initially suggested also adding middleware as a "defense in depth" layer. I rejected this as over-engineering — the global filter is sufficient for v1.
+ไม่ได้แค่พิมพ์ "เขียนโค้ดให้หน่อย" แล้วเอามาใช้เลย วิธีที่ใช้จริงคือ อธิบาย problem ให้ Claude ฟัง → Claude เสนอตัวเลือก → เราเลือกและบอกเหตุผล → Claude ช่วย implement
 
 ---
 
-## Prompt 2 — Tenant Isolation Pattern
+## Prompt 1 — ออกแบบ Tenant Isolation
 
-**Prompt:**
-> "Show me the EF Core DbContext with global query filters for Patient, Branch, Appointment.
-> TenantId must come from JWT claims, never from the request body."
+**ที่ถาม:**
+> "Multi-tenant clinic POS, 1 Tenant มีหลาย Branch, 1 Patient อยู่ใน Tenant เดียว
+> วิธีไหนปลอดภัยที่สุดที่จะป้องกันไม่ให้ developer ดึงข้อมูลข้าม Tenant โดยไม่ตั้งใจ?"
 
-**Accepted:** The ICurrentTenantService pattern — inject into DbContext constructor.
+**Claude เสนอ 3 ทาง:**
+- Middleware filter
+- EF Core Global Query Filters
+- PostgreSQL Row-Level Security
 
-**Rejected:** Claude first suggested putting TenantId in a static field. Rejected immediately — not thread-safe in async contexts.
+**ที่เลือกและเหตุผล:**
+เลือก EF Core Global Query Filters เพราะ filter อยู่ใน DbContext เลย ทุก query ได้รับ filter อัตโนมัติ ไม่ต้องพึ่งให้ developer จำทุกครั้ง ต่างจาก Middleware ที่ถ้าลืมก็รั่วทันที ส่วน RLS ดีแต่ซับซ้อนเกินสำหรับ v1
 
-**Iteration:** Asked Claude to also handle the Seeder use case where we need to bypass the filter to write seed data across tenants. Led to SeederDbContext with SeederTenantService returning Guid.Empty.
-
----
-
-## Prompt 3 — Duplicate Phone & Concurrency
-
-**Prompt:**
-> "Phone must be unique per tenant, not globally. How do I handle concurrency safely?
-> Two requests creating the same patient simultaneously must not both succeed."
-
-**Claude's suggestion:** Application-level check + DB unique index as the final guard.
-
-**My validation:** The application check alone is NOT safe under concurrency (TOCTOU race). The DB unique index on (TenantId, PhoneNumber) is the actual guarantee. The application check is just for a friendlier error message.
-
-**What I added:** Catch `DbUpdateException` and check for the index name to return a clean 409 Conflict instead of a 500.
+**ที่ reject:**
+Claude แนะนำให้ใส่ Middleware เพิ่มเป็น "defense in depth" ด้วย บอกไปว่าไม่เอา ซ้ำซ้อนและเพิ่ม complexity โดยไม่จำเป็น
 
 ---
 
-## Prompt 4 — Appointment Duplicate Prevention
+## Prompt 2 — TenantId มาจากไหน
 
-**Prompt:**
-> "Prevent duplicate appointments: same PatientId + BranchId + StartAt within same Tenant.
-> Must be safe under concurrent requests."
+**ที่ถาม:**
+> "ให้ TenantId มาจาก JWT claims เท่านั้น ห้ามมาจาก request body เด็ดขาด"
 
-**Accepted:** DB unique index on (TenantId, PatientId, BranchId, StartAt).
+**Claude ผิดอะไร:**
+ครั้งแรก Claude ใส่ TenantId ใน static field — reject ทันที เพราะ static field ไม่ thread-safe ใน async context
 
-**Rejected:** Claude suggested using a pessimistic lock (`SELECT FOR UPDATE`). This is correct but adds complexity. The unique index is simpler, equally safe, and lets PostgreSQL handle the race condition atomically.
+**ที่ได้:**
+ใช้ `ICurrentTenantService` inject เข้า DbContext constructor แล้วอ่านจาก `HttpContext.User` claims แทน
+
+**iteration เพิ่ม:**
+ถามต่อว่า "แล้ว Seeder ล่ะ? ต้องเขียนข้อมูลข้าม Tenant ได้" Claude แนะนำให้ทำ `SeederDbContext` แยก ที่ bypass filter ได้ ใช้ได้ดี
 
 ---
 
-## Prompt 5 — RabbitMQ Event Design
+## Prompt 3 — เบอร์โทรซ้ำ
 
-**Prompt:**
-> "When an appointment is created, publish an AppointmentCreated event to RabbitMQ.
-> Payload must include TenantId. Should this be in-transaction or after-commit?"
+**ที่ถาม:**
+> "PhoneNumber ต้อง unique ภายใน Tenant เดียวกัน ถ้า 2 request ส่งมาพร้อมกันต้องไม่ผ่านทั้งคู่"
 
-**Claude's output:** Explained outbox pattern (transactional) vs. after-commit.
+**Claude แนะนำ:**
+เช็คใน application layer ก่อน แล้ว rely on DB unique index เป็น safety net
 
-**My decision:** After-commit for v1. Noted the trade-off in README — if the process crashes between DB save and publish, the event is lost. Acceptable for v1.
+**ที่คิดเพิ่ม:**
+การเช็คใน application layer อย่างเดียวมี race condition (TOCTOU) อยู่ DB unique index บน `(TenantId, PhoneNumber)` ต่างหากที่ป้องกันจริงๆ ส่วน application check ไว้แค่ให้ error message ดูดีขึ้น จาก 500 เป็น 409
 
-**What I rejected:** Full outbox implementation. Too complex for the timebox.
+---
+
+## Prompt 4 — นัดซ้ำ
+
+**ที่ถาม:**
+> "ป้องกัน appointment ซ้ำ: patient เดิม + branch เดิม + เวลาเดิม ภายใน tenant เดียวกัน ต้อง safe ภายใต้ concurrency"
+
+**Claude เสนอครั้งแรก:**
+Pessimistic lock (`SELECT FOR UPDATE`)
+
+**ที่เลือก:**
+DB unique index บน `(TenantId, PatientId, BranchId, StartAt)` แทน ง่ายกว่า PostgreSQL จัดการ race condition เองได้เลย ไม่ต้องมาจัดการ lock เอง
+
+---
+
+## Prompt 5 — RabbitMQ event ส่งตอนไหน
+
+**ที่ถาม:**
+> "Event AppointmentCreated ควร publish ใน transaction หรือหลัง commit?"
+
+**Claude อธิบาย trade-off:**
+In-transaction + outbox = guaranteed แต่ซับซ้อน, After-commit = ง่ายแต่ถ้า process crash ระหว่าง save กับ publish event หาย
+
+**ที่ตัดสินใจ:**
+After-commit สำหรับ v1 บันทึก trade-off ไว้ใน README แล้ว ไม่คุ้มที่จะทำ outbox pattern ใน 90 นาที
 
 ---
 
 ## Prompt 6 — Authorization
 
-**Prompt:**
-> "Viewer role cannot create patients but can view them.
-> Admin and User can create. How do I enforce this with minimal code?"
+**ที่ถาม:**
+> "Viewer ดูได้แต่สร้าง patient ไม่ได้ Admin กับ User สร้างได้ วิธีที่ง่ายที่สุด?"
 
-**Accepted:** `[Authorize(Roles = "Admin,User")]` on POST, `[Authorize(Roles = "Admin,User,Viewer")]` on GET.
+**Claude เสนอครั้งแรก:**
+Custom `IAuthorizationRequirement` policy
 
-**Rejected:** Claude suggested a custom policy with IAuthorizationRequirement. Overkill for 3 static roles. Attribute-based is simpler and more readable.
+**ที่ใช้จริง:**
+`[Authorize(Roles = "Admin,User")]` บน POST, `[Authorize(Roles = "Admin,User,Viewer")]` บน GET แค่นี้พอ 3 roles ไม่จำเป็นต้องมี policy engine
 
 ---
-
-## What I Did NOT Use AI For
-
-- Trade-off decisions (after-commit vs outbox, simple FK vs join table for branches)
-- Reviewing output for tenant safety correctness
-- Deciding what NOT to build within the timebox
