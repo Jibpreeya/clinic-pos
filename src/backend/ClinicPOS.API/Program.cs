@@ -62,9 +62,15 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-// ── Seed ──────────────────────────────────────────────────────────────────────
+// ── Migration & Seed ──────────────────────────────────────────────────────────
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await dbContext.Database.MigrateAsync();
+}
+
 await DatabaseSeeder.SeedAsync(app.Services);
 
 app.Run();
 
-public partial class Program { }  // for integration tests
+public partial class Program { }

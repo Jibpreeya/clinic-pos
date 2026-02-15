@@ -2,6 +2,7 @@ using ClinicPOS.Domain.Entities;
 using ClinicPOS.Infrastructure.Messaging;
 using ClinicPOS.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using ClinicPOS.Domain.Exceptions;
 
 namespace ClinicPOS.Application.Appointments;
 
